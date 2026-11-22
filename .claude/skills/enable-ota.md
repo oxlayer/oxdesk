@@ -7,7 +7,7 @@ without anyone running the deploy. Design and rationale:
 ## 1. The token (private repositories only)
 
 A private repository needs one: without it the API answers `200` with
-`{"message":"Not Found"}` and nothing works. `oxlayer/ox-desk` is public
+`{"message":"Not Found"}` and nothing works. `oxlayer/oxdesk` is public
 since 2026-11-15, so a machine that updates from it needs no token, and one
 that already has a token keeps working with it.
 

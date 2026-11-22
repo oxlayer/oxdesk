@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="#get-started"><b>Get started</b></a> ·
-  <a href="https://github.com/oxlayer/ox-desk/releases/latest">Download</a> ·
+  <a href="https://github.com/oxlayer/oxdesk/releases/latest">Download</a> ·
   <a href="specs/000-overview.md">How it works</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
@@ -62,7 +62,7 @@ come and help shape them.
 You need two or more computers on the same network. On Ubuntu:
 
 ```bash
-git clone https://github.com/oxlayer/ox-desk.git && cd ox-desk
+git clone https://github.com/oxlayer/oxdesk.git && cd ox-desk
 bash install.sh          # then open http://127.0.0.1:8787/setup
 ```
 

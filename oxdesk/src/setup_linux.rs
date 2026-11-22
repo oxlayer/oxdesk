@@ -369,7 +369,7 @@ fn install_clock() -> Result<String, String> {
         // Not a path of this machine: this unit is WRITTEN on the
         // user's disk, and a `file:///home/<someone>/dev/...` there
         // points at a checkout they do not have.
-        "Documentation=https://github.com/oxlayer/ox-desk/blob/main/specs/015-ota.md\n",
+        "Documentation=https://github.com/oxlayer/oxdesk/blob/main/specs/015-ota.md\n",
         "\n",
         "[Service]\n",
         "Type=oneshot\n",

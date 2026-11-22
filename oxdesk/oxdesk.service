@@ -3,7 +3,7 @@
 
 [Unit]
 Description=oxdesk - control plane for the LAN machines
-Documentation=https://github.com/oxlayer/ox-desk/blob/main/specs/001-control-plane.md
+Documentation=https://github.com/oxlayer/oxdesk/blob/main/specs/001-control-plane.md
 
 [Service]
 Type=simple

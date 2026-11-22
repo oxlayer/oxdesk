@@ -27,7 +27,7 @@ use crate::state::{self, State};
 
 /// The repo the build comes from. Overridable through the environment to
 /// test against another repo without recompiling.
-const REPO: &str = "oxlayer/ox-desk";
+const REPO: &str = "oxlayer/oxdesk";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
