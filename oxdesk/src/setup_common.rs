@@ -347,7 +347,7 @@ pub fn ota(bin: &std::path::Path, token: &std::path::Path, clock: Result<String,
 
     // No token is not a problem any more. It was while the repository was
     // private, when the API answered "Not Found" without one; since
-    // 2026-11-15 oxlayer/ox-desk is public and answers anyone, and
+    // 2026-11-15 oxlayer/oxdesk is public and answers anyone, and
     // oxdesk-ota sends no token when it has none. A token that IS there
     // still has to be private, below.
     // A secret readable by any process on the machine is a leaked secret

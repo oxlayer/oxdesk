@@ -735,9 +735,9 @@ So the route was C, with one change: the full history was kept, not only
 `main`, because the commit dates are the record of the work.
 
 1. **The original repository became the archive.** Renamed to
-   `oxlayer/ox-desk-archive`, it stays private, with the unscrubbed history,
+   `oxlayer/oxdesk-archive`, it stays private, with the unscrubbed history,
    pull requests #1–#29 and Releases v0.1.0–v0.2.8.
-2. **A new repository took the name `oxlayer/ox-desk`**, because the
+2. **A new repository took the name `oxlayer/oxdesk`**, because the
    updater has it compiled in ([`ota/src/apply.rs`](../ota/src/apply.rs)).
    Until a Release exists there, OTA reads a 404, stops with "GitHub
    answered: Not Found" and swaps nothing.
