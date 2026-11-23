@@ -159,6 +159,37 @@
   .diskalert b{font-family:var(--mono);font-weight:600;margin-left:4px}
   .diskalert.lvl-low{color:var(--warn);background:color-mix(in srgb,var(--warn) 13%,transparent)}
   .diskalert.lvl-critical{color:var(--down);background:color-mix(in srgb,var(--down) 13%,transparent)}
+  .diskfree{margin-top:8px}
+  .diskbtn,.dkbtns button{font:inherit;font-size:12px;font-weight:600;padding:5px 11px;border-radius:9px;
+    border:1px solid var(--line);background:var(--inset);color:var(--fg);cursor:pointer}
+  .diskalert .diskbtn{margin-left:8px;padding:2px 8px;font-size:11.5px}
+  #diskdlg{border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--fg);
+    width:min(660px,92vw);padding:0;box-shadow:var(--shadow)}
+  #diskdlg::backdrop{background:rgba(0,0,0,.35)}
+  .dk{padding:18px 20px;font-size:13px}
+  .dk h3{margin:0 0 4px;font-size:15px;font-weight:650}
+  .dk h4{margin:16px 0 4px;font-size:10.5px;font-weight:650;letter-spacing:.07em;
+    text-transform:uppercase;color:var(--faint)}
+  .dkwait,.dkdrive{color:var(--dim);margin:4px 0}
+  .dkdrive b{font-family:var(--mono);color:var(--fg)}
+  .dkrow{display:grid;grid-template-columns:20px 1fr auto;gap:1px 8px;align-items:baseline;
+    padding:7px 0;border-top:1px solid var(--line);cursor:pointer}
+  .dkrow.off{color:var(--faint);cursor:default}
+  .dkrow .dks{font-family:var(--mono);font-size:12px}
+  .dkrow .dkn{grid-column:2 / 4;color:var(--faint);font-size:11.5px}
+  .dkels{list-style:none;margin:0;padding:0}
+  .dkels li{display:flex;justify-content:space-between;gap:12px;padding:3px 0;font-size:12px;color:var(--dim)}
+  .dkels .dkp{font-family:var(--mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dkels b{font-family:var(--mono);font-weight:600;color:var(--fg);white-space:nowrap}
+  .dkadm{color:var(--dim);font-size:12px;margin:12px 0 0}
+  .dkadm code{font-family:var(--mono);font-size:11.5px;color:var(--fg)}
+  .dkres{margin:10px 0 0;padding:9px 11px;border-radius:9px;background:var(--inset)}
+  .dkres b{font-family:var(--mono)}
+  .dkv{color:var(--dim);font-size:12px;margin-top:3px}
+  .dkbtns{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:16px}
+  .dksum{font-family:var(--mono);font-size:12px;color:var(--dim);margin-right:auto}
+  .dkbtns .go{background:var(--accent);border-color:var(--accent);color:#fff}
+  .dkbtns button:disabled{opacity:.5;cursor:default}
 
   .ctlwrap{margin-top:22px;background:var(--card);border:1px solid var(--line);
     border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
@@ -816,7 +847,8 @@ function card(h){
   const alert = (lvl === 'low' || lvl === 'critical') ? `<div class="diskalert lvl-${lvl}"
       title="${esc(lvl === 'critical' ? 'the system drive is almost full: things start failing on this machine'
         : 'the system drive is running low: clean up before it fills')}">${lvl === 'critical'
-      ? 'Disk almost full' : 'Disk running low'} <b>${(d.disk_free_gb || 0).toFixed(1)} GB free</b></div>` : '';
+      ? 'Disk almost full' : 'Disk running low'} <b>${(d.disk_free_gb || 0).toFixed(1)} GB free</b>
+      ${h.online ? `<button class="diskbtn" data-disk="${esc(h.name)}">Free up space</button>` : ''}</div>` : '';
 
   return `<div class="card${h.online ? '' : ' off'}">
     <div class="hero">${machineSvg(h)}</div>
@@ -837,6 +869,8 @@ function card(h){
         <div class="svc"><table>${h.services.map(svcRow).join('')}</table></div>
         ${facts.length ? `<dl class="facts">${facts.join('')}</dl>` : ''}
         ${det.length ? `<div class="det">${det.join('')}</div>` : ''}
+        ${d.disk_total_gb && h.online ? `<div class="diskfree"><button class="diskbtn"
+          data-disk="${esc(h.name)}">Free up space</button></div>` : ''}
       </div>
     </details>
   </div>`;
@@ -1468,6 +1502,135 @@ async function whatsNew(){
 }
 document.addEventListener('click', ev => {
   if (!ev.target.closest('.newswrap')) document.getElementById('newspop').classList.remove('on');
+});
+
+// --- free up space (specs/027) ------------------------------------------
+// Listing reads only. Cleaning needs a click on a list the person has seen,
+// and the result shows two numbers: what was counted and what the drive
+// gained. The drive's number is the one that counts.
+const GiB = 1073741824;
+// MB under a gigabyte: the first cleanup on the reference machine freed
+// 47 MB, and "0.0 GB" said nothing had happened.
+const gb = b => Math.abs(b) < GiB ? Math.round(b / 1048576) + ' MB'
+  : (b / GiB).toFixed(Math.abs(b) >= 10 * GiB ? 0 : 1) + ' GB';
+let DISK = null;
+
+function diskDialog(){
+  let d = document.getElementById('diskdlg');
+  if (!d){
+    d = document.createElement('dialog');
+    d.id = 'diskdlg';
+    document.body.append(d);
+    d.addEventListener('click', ev => {
+      if (ev.target === d || ev.target.closest('[data-disk-close]')) d.close();
+      else if (ev.target.closest('[data-disk-go]')) diskClean();
+    });
+    d.addEventListener('change', diskCount);
+  }
+  return d;
+}
+
+async function diskFetchList(host){
+  const r = await fetch('/api/disk/list?host=' + encodeURIComponent(host), {cache:'no-store'});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+async function openDisk(host){
+  const d = diskDialog();
+  DISK = {host, list: null, busy: false};
+  d.innerHTML = `<div class="dk"><h3><span>Free up space on</span> <b data-no-i18n>${esc(host)}</b></h3>
+    <p class="dkwait">Measuring what can be reclaimed. This can take up to half a minute.</p></div>`;
+  if (!d.open) d.showModal();
+  try{
+    const list = await diskFetchList(host);
+    if (!DISK || DISK.host !== host) return;
+    DISK.list = list;
+    diskRender(null, null);
+  }catch(e){
+    d.querySelector('.dkwait').innerHTML =
+      `<span class="no">Could not list it</span> <span data-no-i18n>${esc(e.message)}</span>`;
+  }
+}
+
+function diskRender(result, error){
+  const d = diskDialog(), L = DISK.list;
+  const STATE = {moved: 'moved elsewhere, not touched', absent: 'not on this machine', empty: 'nothing to clean'};
+  const row = p => {
+    const can = p.state === 'ok' && p.bytes > 0;
+    // Ticked only what rebuilds at no cost; a download is the person's call.
+    const on = can && p.group === 'free';
+    const note = !can ? `<span>${esc(STATE[p.state] || p.state)}</span>`
+      : p.last_written ? `<span>last written</span> <span data-no-i18n>${esc(p.last_written)}</span>` : '';
+    return `<label class="dkrow${can ? '' : ' off'}">
+      <input type="checkbox" value="${esc(p.id)}" data-bytes="${p.bytes}"${on ? ' checked' : ''}${can ? '' : ' disabled'}>
+      <span class="dkl">${esc(p.label)}</span>
+      <span class="dks" data-no-i18n>${can ? gb(p.bytes) : ''}</span>
+      <span class="dkn">${note}</span>
+    </label>`;
+  };
+  const group = g => L.places.filter(p => p.group === g).map(row).join('');
+  const els = (L.elsewhere || []).map(e => `<li><span class="dkp" data-no-i18n>${esc(e.path)}</span>
+      <b data-no-i18n>${e.complete ? '' : '&ge; '}${gb(e.bytes)}</b></li>`).join('');
+  const res = result ? `<div class="dkres"><div><span>Deleted</span> <b data-no-i18n>${gb(result.counted_bytes)}</b>
+      &middot; <span>the drive gained</span> <b data-no-i18n>${result.gained_bytes == null ? '?' : gb(result.gained_bytes)}</b>
+      ${result.left_in_use_bytes ? `&middot; <b data-no-i18n>${gb(result.left_in_use_bytes)}</b> <span>left in use</span>` : ''}</div>
+      <div class="dkv">${esc(result.verdict)}</div></div>`
+    : error ? `<div class="dkres"><span class="no">Could not clean</span> <span data-no-i18n>${esc(error)}</span></div>` : '';
+  d.innerHTML = `<div class="dk">
+    <h3><span>Free up space on</span> <b data-no-i18n>${esc(DISK.host)}</b></h3>
+    ${L.free_bytes != null ? `<p class="dkdrive"><b data-no-i18n>${gb(L.free_bytes)}</b> <span>free of</span>
+      <b data-no-i18n>${gb(L.total_bytes)}</b></p>` : ''}
+    ${res}
+    ${L.note ? `<p class="dkwait">${esc(L.note)}</p>` : ''}
+    ${L.places.length ? `<h4>Rebuilds by itself</h4>${group('free')}<h4>Rebuilds with a download</h4>${group('download')}` : ''}
+    ${els ? `<h4>Not touched: the biggest folders elsewhere</h4><ul class="dkels">${els}</ul>` : ''}
+    ${(L.admin || []).map(a => `<p class="dkadm"><span>Needs an administrator terminal:</span>
+      <code data-no-i18n>${esc(a)}</code></p>`).join('')}
+    <div class="dkbtns"><span class="dksum" data-no-i18n></span>
+      <button data-disk-close>Close</button><button class="go" data-disk-go disabled>Clean selected</button></div>
+  </div>`;
+  diskCount();
+}
+
+function diskCount(){
+  const d = diskDialog();
+  const ticked = [...d.querySelectorAll('.dkrow input:checked')];
+  const go = d.querySelector('[data-disk-go]');
+  if (go) go.disabled = !ticked.length || (DISK && DISK.busy);
+  const sum = d.querySelector('.dksum');
+  if (sum) sum.textContent = ticked.length ? gb(ticked.reduce((n, i) => n + Number(i.dataset.bytes || 0), 0)) : '';
+}
+
+async function diskClean(){
+  const d = diskDialog();
+  if (!DISK || DISK.busy) return;
+  const ids = [...d.querySelectorAll('.dkrow input:checked')].map(i => i.value);
+  if (!ids.length) return;
+  DISK.busy = true;
+  const go = d.querySelector('[data-disk-go]');
+  go.disabled = true;
+  go.textContent = 'Cleaning...';
+  let result = null, error = null;
+  try{
+    const r = await fetch('/api/disk/clean', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({host: DISK.host, ids})});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    result = j;
+    // List again: what is left is the truth now, not the old sizes.
+    DISK.list = await diskFetchList(DISK.host);
+  }catch(e){
+    error = e.message;
+  }
+  DISK.busy = false;
+  diskRender(result, error);
+}
+
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-disk]');
+  if (b){ ev.preventDefault(); openDisk(b.dataset.disk); }
 });
 
 // --- layout -----------------------------------------------------------

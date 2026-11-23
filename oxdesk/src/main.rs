@@ -33,6 +33,7 @@ mod border;
 mod border_win;
 mod config;
 mod disk;
+mod disk_clean;
 mod edge_state;
 mod files;
 mod guard;
@@ -213,6 +214,9 @@ fn run_cli(args: &[String]) -> Option<std::process::ExitCode> {
             let port = Config::load().map(|c| c.port).unwrap_or(8787);
             Some(crate::clip::cli_set(port))
         }
+        // Another machine's panel asking what can be reclaimed here, or
+        // asking to clean it (specs/027). JSON on stdout.
+        Some("disk-list") | Some("disk-clean") => Some(crate::disk_clean::cli(args)),
         #[cfg(target_os = "linux")]
         Some("clip-probe") => Some(crate::clip_files::cli_probe()),
         // Receives files from another machine. `clip-arq-set` reads a tar
@@ -1033,6 +1037,66 @@ fn get_setup(req: Request, cfg: &RwLock<Config>) {
 /// server defect, it is the normal "I opened the window, now it is up to
 /// you" case. The page shows the message as an instruction, not as an
 /// error.
+/// A disk listing (`ids` is `None`) or cleaning on `host`: in this process
+/// for this machine, and for another one over the same path as the
+/// clipboard (`oxdesk disk-list` / `disk-clean`, which print JSON).
+fn disk_answer(req: Request, cfg: &RwLock<Config>, host: Option<String>, ids: Option<Vec<String>>) {
+    let snap = match cfg.read() {
+        Ok(g) => g.clone(),
+        Err(_) => return err_json(req, 500, "config lock poisoned"),
+    };
+    let h = match host.as_deref() {
+        None => snap.hosts.iter().find(|h| h.is_local()),
+        Some(n) => snap.hosts.iter().find(|h| h.name == n),
+    };
+    let Some(h) = h else {
+        return err_json(req, 404, "that machine is not in the config");
+    };
+    if h.is_local() {
+        let body = match &ids {
+            None => serde_json::to_string(&disk_clean::list()),
+            Some(i) => serde_json::to_string(&disk_clean::clean(i)),
+        };
+        return match body {
+            Ok(b) => ok_json(req, b),
+            Err(e) => err_json(req, 500, &format!("serialize: {e}")),
+        };
+    }
+    let sub = match &ids {
+        None => "disk-list".to_string(),
+        Some(i) => format!("disk-clean {}", i.join(",")),
+    };
+    // What a real answer has: a listing has `places`, a cleanup a `verdict`.
+    // An OxDesk from before this feature also answers JSON, an error object
+    // ("unknown command"), so being JSON proves nothing.
+    let must = if ids.is_none() { "places" } else { "verdict" };
+    match remote::run(h, &remote::oxdesk_command(h, &sub), 8) {
+        // The last line that is a JSON object: the shell around it may add
+        // warnings before it.
+        Ok(out) => {
+            let v = out
+                .lines()
+                .rev()
+                .find(|l| l.trim_start().starts_with('{'))
+                .and_then(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok());
+            match v {
+                Some(v) if v.get(must).is_some() => ok_json(req, v.to_string()),
+                Some(v) if v.get("error").is_some() => err_json(
+                    req,
+                    502,
+                    &format!(
+                        "{}'s OxDesk does not have this yet (it answered: {}); update it first",
+                        h.name,
+                        v["error"].as_str().unwrap_or("an error")
+                    ),
+                ),
+                _ => err_json(req, 502, &format!("{} sent no answer this panel can read", h.name)),
+            }
+        }
+        Err(e) => err_json(req, 502, &format!("{}: {e}", h.name)),
+    }
+}
+
 fn post_setup_repair(mut req: Request, cfg: &RwLock<Config>) {
     let mut body = String::new();
     if req.as_reader().read_to_string(&mut body).is_err() {
@@ -1095,6 +1159,38 @@ fn handle(req: Request, cfg: &RwLock<Config>, cache: &Mutex<Cache>) {
             Ok(()) => ok_json(req, "{\"ok\":true}".into()),
             Err(e) => err_json(req, 500, &e),
         };
+    }
+    // Free up space (specs/027): what can be reclaimed on a machine, and
+    // cleaning the places the person ticked. Listing reads only.
+    if path == "/api/disk/list" && method == "GET" {
+        let q = req.url().split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+        let host = q
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(k, _)| *k == "host")
+            .map(|(_, v)| files::percent_decode(v));
+        return disk_answer(req, cfg, host, None);
+    }
+    if path == "/api/disk/clean" && method == "POST" {
+        // `as_reader` is a `dyn Read`: its methods need no import.
+        let mut req = req;
+        let mut body = String::new();
+        if req.as_reader().read_to_string(&mut body).is_err() {
+            return err_json(req, 400, "could not read the request");
+        }
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        let host = v.get("host").and_then(|h| h.as_str()).map(String::from);
+        let ids: Vec<String> = v
+            .get("ids")
+            .and_then(|i| i.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        // Ids only, never paths, and only the list's own: anything else is
+        // refused here, before it reaches a shell on another machine.
+        if ids.is_empty() || ids.iter().any(|i| !i.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')) {
+            return err_json(req, 400, "give the ids to clean, as listed");
+        }
+        return disk_answer(req, cfg, host, Some(ids));
     }
     // "Check for updates" in the trays: asks the updater, installs nothing.
     if path == "/api/update/check" && method == "POST" {

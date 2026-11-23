@@ -127,7 +127,23 @@ these verbs move with the others.
    an independent reading: Windows `C:` 20.96 of 111.3 GB (`Get-PSDrive`
    says 20.96), Ubuntu `/` 29.60 of 218.0 GB (`df -h` says 30G of 218G), the
    Mac 16.84 of 228.3 GB.
-2. Listing and cleaning on Windows, where it happened.
+2. Listing and cleaning on Windows, where it happened: **done**
+   (2026-11-19), in `oxdesk/src/disk_clean.rs` and the panel's "Free up
+   space" dialog. Seen on the reference Windows machine:
+   - the junctions another cleanup had left under Playwright's folder were
+     skipped, and only the one real folder (437 MB) was offered; the npm
+     cache, which lives on the data drive, read "moved elsewhere";
+   - the first cleanup counted 47.40 MB, the daemon measured 47.43 MB
+     gained, and a reading taken outside it 47.49 MB; 22.9 MB were held
+     open (shader caches, a temp file) and stayed, said as such;
+   - a second run found only those held files and said "nothing was
+     deleted", not success;
+   - the "elsewhere" walk first ran out of time on two folders of small
+     files and never reached AppData, where the big folders were; it now
+     walks six folders at a time and marks a size it could not finish as
+     "at least";
+   - a machine on an older build answers with an error object, and the
+     dialog says that machine needs updating first.
 3. The Linux and macOS lists.
 4. A desktop notification when a machine turns critical, for the machine
    nobody has the panel open on.
