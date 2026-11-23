@@ -62,22 +62,49 @@ fn alive(p: &mut Process) -> bool {
 /// When each target's screen host was last known to be up.
 ///
 /// The host ends itself 30 s after its last client leaves (or after it
-/// starts with nobody). So for 20 s after we woke it, or after a KVM
+/// starts with nobody); a Windows host lingers 10 minutes after its last
+/// switch instead (`WINDOWS_HOST_FRESH`). So for 20 s after we woke it, or after a KVM
 /// session to it ended, it is up -- and asking again over SSH is the
 /// round trip that made going there slower than coming back
 /// (173-344 ms of every switch, measured 2026-11-15).
 static HOST_SEEN: Mutex<std::collections::BTreeMap<String, std::time::Instant>> =
     Mutex::new(std::collections::BTreeMap::new());
 const HOST_FRESH: std::time::Duration = std::time::Duration::from_secs(20);
+/// A Windows host stays up 10 minutes after its last switch
+/// (`stream/src/serve.rs`, `LINGER_AFTER_INPUT_S`), so it is trusted for 9.
+/// Measured on 2026-11-20 with the Ubuntu machine sending to Windows: 8 of
+/// 14 switches spent ~2.5 s waking that host over SSH, because it had quit
+/// ~30 s after the previous switch. Keep this below the host's number: a
+/// host trusted after it quit costs the 1.5 s "did not answer" retry on top
+/// of the wake.
+const WINDOWS_HOST_FRESH: std::time::Duration = std::time::Duration::from_secs(9 * 60);
+/// How long each target's host is trusted, by its system (`fresh_for`).
+static HOST_LINGER: Mutex<std::collections::BTreeMap<String, std::time::Duration>> =
+    Mutex::new(std::collections::BTreeMap::new());
 /// Hosts being woken ahead of an edge right now.
 static WARMING: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::collections::BTreeSet::new());
 
+/// How long `host`'s screen host stays up once seen: longer for a system
+/// whose host lingers for the next switch.
+fn fresh_for(host: &str) -> std::time::Duration {
+    HOST_LINGER.lock().ok().and_then(|m| m.get(host).copied()).unwrap_or(HOST_FRESH)
+}
+
+/// Records how long `h`'s host is trusted, from its system.
+fn note_linger(h: &crate::config::HostCfg) {
+    let d = if h.os.as_deref() == Some("windows") { WINDOWS_HOST_FRESH } else { HOST_FRESH };
+    if let Ok(mut m) = HOST_LINGER.lock() {
+        m.insert(h.name.clone(), d);
+    }
+}
+
 fn host_known_up(host: &str) -> bool {
+    let fresh = fresh_for(host);
     HOST_SEEN
         .lock()
         .ok()
         .and_then(|s| s.get(host).copied())
-        .is_some_and(|t| t.elapsed() < HOST_FRESH)
+        .is_some_and(|t| t.elapsed() < fresh)
 }
 
 fn note_host_up(host: &str) {
@@ -112,6 +139,7 @@ pub fn prewarm(cfg: &std::sync::Arc<std::sync::RwLock<Config>>, host: &str) {
             .ok_or_else(|| "config lock poisoned".to_string())
             .and_then(|c| {
                 let h = c.hosts.iter().find(|h| h.name == host).ok_or("not in the config")?;
+                note_linger(h);
                 let port = h.screen.as_ref().map(|s| s.port).ok_or("no [hosts.screen]")?;
                 crate::screen::wake_host(h, port)
             });
@@ -280,6 +308,7 @@ fn send_now(cfg: &Config, host: &str) -> Result<String, String> {
         .iter()
         .find(|x| x.name == host)
         .ok_or_else(|| format!("host '{host}' is not in the config"))?;
+    note_linger(h);
     // Sending to the local machine = bringing it back. Same "is it here?"
     // test focus.rs uses, and not just the `local` flag: it is optional in
     // the config and not every host declares it, so trusting only it would
@@ -783,6 +812,22 @@ mod release_cmd_tests {
     fn host(os: &str) -> HostCfg {
         let toml = format!("name = \"peer\"\naddr = \"peer.local\"\nos = \"{os}\"\n");
         toml::from_str(&toml).expect("fixture must parse")
+    }
+
+    /// A Windows host lingers for the next switch and is trusted for 9
+    /// minutes; any other system keeps the 20 s it always had.
+    #[test]
+    fn a_windows_host_is_trusted_longer() {
+        let mut w = host("windows");
+        w.name = "linger-test-windows".into();
+        let mut l = host("linux");
+        l.name = "linger-test-linux".into();
+        note_linger(&w);
+        note_linger(&l);
+        assert_eq!(fresh_for("linger-test-windows"), WINDOWS_HOST_FRESH);
+        assert_eq!(fresh_for("linger-test-linux"), HOST_FRESH);
+        assert_eq!(fresh_for("never-seen"), HOST_FRESH, "unknown: the short window");
+        assert!(WINDOWS_HOST_FRESH < std::time::Duration::from_secs(600), "below the host's linger");
     }
 
     /// The verb is substituted, not appended: the retry sends a second

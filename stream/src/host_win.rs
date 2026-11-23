@@ -86,7 +86,13 @@ pub fn run(port: u16, monitor: u32) -> anyhow::Result<()> {
     //
     // It does NOT solve a really locked session: there the secure desktop
     // is in front and DXGI does not capture it, by design. Known limit.
-    let _awake = crate::input_win::ScreenAwake::new();
+    //
+    // Keeping it awake is per session since 2026-11-20 (`keep_awake_in_use`),
+    // not for the life of the process: the host now lingers for the next
+    // switch (`serve::LINGER_AFTER_INPUT_S`), and a guard held for its whole
+    // life would keep the monitor on for minutes after the person left. The
+    // wake here stays: the host is started because a session is about to
+    // begin, and capture has to open with the output on.
     crate::input_win::wake_screen();
     // And the screensaver, which is a DIFFERENT problem from the screen
     // being off: it runs on its own desktop and DXGI refuses to duplicate
@@ -121,6 +127,7 @@ pub fn run(port: u16, monitor: u32) -> anyhow::Result<()> {
     // A KVM source needs it to keep the cursor's position and come home by
     // the edge (`serve::announce_size`).
     signals.set_size(w, h);
+    keep_awake_in_use(Arc::clone(&signals));
 
     let network = {
         let signals = Arc::clone(&signals);
@@ -146,6 +153,10 @@ pub fn run(port: u16, monitor: u32) -> anyhow::Result<()> {
     let mut mute_since: Option<Instant> = None;
     let mut last_nudge: Option<Instant> = None;
     let mut already_recreated = false;
+    // Capture failures in a row. With nobody watching (a host lingering for
+    // the next switch, the screen locked), retrying every few hundred ms
+    // would print three lines a second for as long as the lock lasts.
+    let mut failing = 0u32;
 
     while !signals.should_exit() {
         // With nobody watching, do not encode: the frame would go into a
@@ -192,14 +203,26 @@ pub fn run(port: u16, monitor: u32) -> anyhow::Result<()> {
             already_recreated = false;
         }
 
+        // Said on the first failure and then every 60th; retried fast only
+        // when someone is waiting for a picture.
+        let say_it = failing == 0 || failing % 60 == 0;
+        let pause = Duration::from_millis(if watching { 250 } else { 5000 });
         let state = match screen.next_frame(WAIT_MS) {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("  capture: {e}");
-                std::thread::sleep(Duration::from_millis(200));
+                if say_it {
+                    eprintln!("  capture: {e} (failure {} in a row)", failing + 1);
+                }
+                failing += 1;
+                std::thread::sleep(pause);
                 continue;
             }
         };
+
+        if failing > 0 && !matches!(state, CaptureState::Lost) {
+            println!("  capture back after {failing} failure(s)");
+            failing = 0;
+        }
 
         match state {
             CaptureState::Lost => {
@@ -207,7 +230,9 @@ pub fn run(port: u16, monitor: u32) -> anyhow::Result<()> {
                 // display. Not an error: recreate and carry on. Failing here
                 // is normal while the secure desktop is in front, hence the
                 // pause before trying again.
-                println!("  capture lost; recreating");
+                if say_it {
+                    println!("  capture lost; recreating");
+                }
                 match screen.recreate() {
                     Ok(changed) => {
                         if let Ok(mut g) = origin.lock() {
@@ -221,8 +246,11 @@ pub fn run(port: u16, monitor: u32) -> anyhow::Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("  recreate: {e}");
-                        std::thread::sleep(Duration::from_millis(300));
+                        if say_it {
+                            eprintln!("  recreate: {e} (failure {} in a row)", failing + 1);
+                        }
+                        failing += 1;
+                        std::thread::sleep(pause);
                     }
                 }
                 continue;
@@ -340,6 +368,7 @@ async fn receive_input(conn: quinn::Connection, origin: Arc<Mutex<(i32, i32)>>) 
     // has to see where the pointer is, and with no mouse installed Windows
     // draws nothing.
     let _arrow = CursorWhileDriving::new();
+    let _in_use = InUse::new();
     let mut injector = Injector::new(origin);
     let mut reader = Reader::default();
     let mut buf = vec![0u8; 4096];
@@ -379,6 +408,51 @@ async fn receive_input(conn: quinn::Connection, origin: Arc<Mutex<(i32, i32)>>) 
 /// forgot to turn it off would leave an arrow stuck on someone's screen
 /// forever. Turning it ON lives in `new` for the same reason -- so there is
 /// no way to raise the counter without something that lowers it.
+/// Sessions applying input on this machine right now.
+static IN_USE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Marks a session as using this machine, for as long as it lives.
+struct InUse;
+
+impl InUse {
+    fn new() -> Self {
+        IN_USE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        InUse
+    }
+}
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        IN_USE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Holds the display awake while a session uses this machine (someone
+/// typing through the KVM, or watching), and lets it sleep otherwise.
+///
+/// A thread of its own because `SetThreadExecutionState` belongs to the
+/// thread that calls it. When a session starts on a host that lingered,
+/// the screen may have gone off or the screensaver may be up: both are
+/// dealt with then, as they were at startup.
+fn keep_awake_in_use(signals: Arc<Signals>) {
+    std::thread::spawn(move || {
+        let mut held: Option<crate::input_win::ScreenAwake> = None;
+        while !signals.should_exit() {
+            let want = IN_USE.load(std::sync::atomic::Ordering::SeqCst) > 0 || signals.has_client();
+            if want && held.is_none() {
+                held = Some(crate::input_win::ScreenAwake::new());
+                crate::input_win::wake_screen();
+                let n = crate::input_win::end_screensaver();
+                println!("  session started: keeping the display awake{}", if n > 0 { " (screensaver ended)" } else { "" });
+            } else if !want && held.is_some() {
+                held = None;
+                println!("  no session: the display may sleep again");
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+}
+
 struct CursorWhileDriving;
 
 impl CursorWhileDriving {

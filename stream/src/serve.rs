@@ -33,6 +33,29 @@ pub const IDLE_S: u64 = 20;
 /// because `accept()` alone waits forever.
 pub const FIRST_CLIENT_WAIT_S: u64 = 30;
 
+/// How long the host stays up after its last INPUT client leaves, ready for
+/// the next switch.
+///
+/// Measured on 2026-11-20, with the Ubuntu machine sending to Windows: 8 of
+/// 14 switches took ~2.5 s, and in every one of them all but 10-50 ms was
+/// waking this host over SSH, because it had quit ~30 s after the previous
+/// switch. Staying up for the next one turns those into the warm case
+/// (10-14 ms in the same log).
+///
+/// Windows only, for now. A Linux host holds a RemoteDesktop session while
+/// it runs (GNOME shows it as screen sharing), and the Mac host captures the
+/// whole time; neither should linger without a reason a person can see. The
+/// persistent link (specs/025, step 1) is the answer for all three; this is
+/// the stopgap before it. The daemon trusts this number minus a margin
+/// (`oxdesk/src/kvm.rs`, `WINDOWS_HOST_FRESH`): keep them in step.
+pub const LINGER_AFTER_INPUT_S: u64 = if cfg!(windows) { 600 } else { 0 };
+
+/// Keep waiting for clients, or shut down? While someone is sending input,
+/// always wait; after the last one left, wait out the linger.
+pub fn keep_waiting(has_input: bool, input_left_ago: Option<Duration>, linger: Duration) -> bool {
+    has_input || input_left_ago.is_some_and(|ago| ago < linger)
+}
+
 /// Wall-clock nanoseconds.
 ///
 /// Wall clock and not monotonic on purpose: the timestamp travels to the
@@ -83,6 +106,9 @@ pub struct Signals {
     /// (`input::size_line`), so a KVM source can keep the cursor's position
     /// and bring the input home at the edge (spec 024).
     size: std::sync::atomic::AtomicU64,
+    /// When the last input client left (the count went to zero), for the
+    /// linger (`LINGER_AFTER_INPUT_S`).
+    input_left_at: std::sync::Mutex<Option<Instant>>,
 }
 
 impl Signals {
@@ -115,11 +141,20 @@ impl Signals {
 
     /// Someone left the input port.
     pub fn input_left(&self) {
-        self.inputs.fetch_sub(1, Ordering::SeqCst);
+        if self.inputs.fetch_sub(1, Ordering::SeqCst) == 1 {
+            if let Ok(mut t) = self.input_left_at.lock() {
+                *t = Some(Instant::now());
+            }
+        }
     }
 
     pub fn has_input(&self) -> bool {
         self.inputs.load(Ordering::SeqCst) > 0
+    }
+
+    /// How long ago the last input client left; `None` if none ever did.
+    pub fn input_left_ago(&self) -> Option<Duration> {
+        self.input_left_at.lock().ok().and_then(|t| t.map(|i| i.elapsed()))
     }
 
     /// Consumes the keyframe request. Returns `true` once per request --
@@ -194,7 +229,13 @@ pub async fn serve_video(
                 // machine's physical monitor. Exiting here would kill the
                 // process receiving their keystrokes, and the keyboard
                 // would snap back on its own in the middle of use.
-                if signals.has_input() {
+                // And after the KVM leaves, a while longer for the next
+                // switch (`LINGER_AFTER_INPUT_S`).
+                if keep_waiting(
+                    signals.has_input(),
+                    signals.input_left_ago(),
+                    Duration::from_secs(LINGER_AFTER_INPUT_S),
+                ) {
                     continue;
                 }
                 if had_client {
@@ -498,6 +539,32 @@ pub async fn serve_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The linger keeps the host for the next switch, and only for a while.
+    #[test]
+    fn the_host_waits_out_the_linger_after_the_last_switch() {
+        let ten_min = Duration::from_secs(600);
+        assert!(keep_waiting(true, None, Duration::ZERO), "someone is typing through it");
+        assert!(keep_waiting(false, Some(Duration::from_secs(25)), ten_min), "25 s after the last switch");
+        assert!(!keep_waiting(false, Some(Duration::from_secs(601)), ten_min), "past the linger");
+        assert!(!keep_waiting(false, None, ten_min), "nobody ever sent input: the old rules apply");
+        assert!(!keep_waiting(false, Some(Duration::from_secs(1)), Duration::ZERO), "no linger: as before");
+    }
+
+    /// The moment the count reaches zero is what the linger counts from;
+    /// a second client leaving while another stays does not start it.
+    #[test]
+    fn the_linger_starts_when_the_last_input_client_leaves() {
+        let s = Signals::default();
+        assert_eq!(s.input_left_ago(), None);
+        s.input_joined();
+        s.input_joined();
+        s.input_left();
+        assert_eq!(s.input_left_ago(), None, "one is still connected");
+        s.input_left();
+        assert!(s.input_left_ago().is_some_and(|d| d < Duration::from_secs(1)));
+        assert!(!s.has_input());
+    }
 
     /// The viewer's keyframe request reaches the encoder flag, over a real
     /// QUIC connection. Without it a lost keyframe on a still screen left
